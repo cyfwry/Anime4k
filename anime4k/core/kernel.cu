@@ -1,7 +1,5 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-//#include <helper_cuda.h>
-//#include <helper_functions.h>
 #include "opencv2/opencv.hpp"
 
 #include <stdio.h>
@@ -13,22 +11,43 @@
 #define max3(a,b,c) (a>b?a:b)>c?(a>b?a:b):c
 #define min4(a,b,c,d) (a<b?a:b)<(c<d?c:d)?(a<b?a:b):(c<d?c:d)
 
+texture<float, 2> tex_img_deriv;
+texture<float, 2> tex_output_deriv;
+
 __device__ void compare(float *point, bool &result) {
 	//多传一个数占最后一位
 	float max = max3(point[0], point[1], point[2]);
 	float min = min4(point[3], point[4], point[5], point[6]);
 	result = (max < min);
 }
-__device__ void condition(float* img_deriv, int choice, int index, bool &result, int *point, int* h_gpu, int* w_gpu) {
-	int idx = index % (*w_gpu);
-	int idy = index / (*w_gpu);
+__device__ void condition(bool reverse, int choice, int idx, int idy, bool &result, int *point, int* h_gpu, int* w_gpu) {
 	int xl = max2(-idx, -1);
 	int xr = min2((*w_gpu) - 1 - idx, 1);
 	int yu = max2(-idy, -1);
 	int yd = min2((*h_gpu) - 1 - idy, 1);
-	float surround[3][3] = { { img_deriv[idx + xl + (idy + yu)*(*w_gpu)], img_deriv[idx + (idy + yu)*(*w_gpu)], img_deriv[idx + xr + (idy + yu)*(*w_gpu)] },
-	                         { img_deriv[idx + xl + idy*(*w_gpu)],        img_deriv[idx + idy*(*w_gpu)],        img_deriv[idx + xr + idy*(*w_gpu)] } ,
-	                         { img_deriv[idx + xl + (idy + yd)*(*w_gpu)], img_deriv[idx + (idy + yd)*(*w_gpu)], img_deriv[idx + xr + (idy + yd)*(*w_gpu)] } };
+	float surround[3][3];
+	if (reverse) {
+		surround[0][0] = tex2D(tex_output_deriv, idx + xl, idy + yu);
+		surround[0][1] = tex2D(tex_output_deriv, idx, idy + yu);
+		surround[0][2] = tex2D(tex_output_deriv, idx + xr, idy + yu);
+		surround[1][0] = tex2D(tex_output_deriv, idx + xl, idy);
+		surround[1][1] = tex2D(tex_output_deriv, idx, idy);
+		surround[1][2] = tex2D(tex_output_deriv, idx + xr, idy);
+		surround[2][0] = tex2D(tex_output_deriv, idx + xl, idy + yd);
+		surround[2][1] = tex2D(tex_output_deriv, idx, idy + yd);
+		surround[2][2] = tex2D(tex_output_deriv, idx + xr, idy + yd);
+	}
+	else {
+		surround[0][0] = tex2D(tex_img_deriv, idx + xl, idy + yu);
+		surround[0][1] = tex2D(tex_img_deriv, idx, idy + yu);
+		surround[0][2] = tex2D(tex_img_deriv, idx + xr, idy + yu);
+		surround[1][0] = tex2D(tex_img_deriv, idx + xl, idy);
+		surround[1][1] = tex2D(tex_img_deriv, idx, idy);
+		surround[1][2] = tex2D(tex_img_deriv, idx + xr, idy);
+		surround[2][0] = tex2D(tex_img_deriv, idx + xl, idy + yd);
+		surround[2][1] = tex2D(tex_img_deriv, idx, idy + yd);
+		surround[2][2] = tex2D(tex_img_deriv, idx + xr, idy + yd);
+	}
 	if (choice == 0) {
 		float input[] = { surround[0][0], surround[0][1], surround[0][2], surround[1][1], surround[2][0], surround[2][1], surround[2][2] };
 		point[0] = idx + xl;
@@ -113,14 +132,16 @@ __device__ void condition(float* img_deriv, int choice, int index, bool &result,
 		result = false;
 	}
 }
-__global__ void deblur(float *src, float *src_deriv, float *dst, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
-	int index = blockIdx.x*blockDim.x + threadIdx.x;
-	if (index < (*nbytes_gpu / sizeof(float))) {
+__global__ void deblur(float *src, float *dst, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse) {
+	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+	int idy = blockIdx.y*blockDim.y + threadIdx.y;
+	int index = idy*(*w_gpu) + idx;
+	while (idx<(*w_gpu) && idy<(*h_gpu)) {
 		float alpha = 175.0f / 255;
 		bool result = false;
 		int point[] = { 0,0,0,0,0,0 };
 		for (int i = 0; i < 8; ++i) {
-			condition(src_deriv, i, index, result, point, h_gpu, w_gpu);
+			condition(reverse, i, idx, idy, result, point, h_gpu, w_gpu);
 			if (result == false) {
 				float new_color_b = 0;
 				float new_color_g = 0;
@@ -130,8 +151,8 @@ __global__ void deblur(float *src, float *src_deriv, float *dst, float *dst_deri
 				float mean_g = 0;
 				float mean_r = 0;
 				mean_b = (src[3 * (point[0] + point[1] * (*w_gpu))] + src[3 * (point[2] + point[3] * (*w_gpu))] + src[3 * (point[4] + point[5] * (*w_gpu))]) / 3;
-				mean_g = (src[3 * (point[0] + point[1] * (*w_gpu))+1] + src[3 * (point[2] + point[3] * (*w_gpu))+1] + src[3 * (point[4] + point[5] * (*w_gpu))+1]) / 3;
-				mean_r = (src[3 * (point[0] + point[1] * (*w_gpu))+2] + src[3 * (point[2] + point[3] * (*w_gpu))+2] + src[3 * (point[4] + point[5] * (*w_gpu))+2]) / 3;
+				mean_g = (src[3 * (point[0] + point[1] * (*w_gpu)) + 1] + src[3 * (point[2] + point[3] * (*w_gpu)) + 1] + src[3 * (point[4] + point[5] * (*w_gpu)) + 1]) / 3;
+				mean_r = (src[3 * (point[0] + point[1] * (*w_gpu)) + 2] + src[3 * (point[2] + point[3] * (*w_gpu)) + 2] + src[3 * (point[4] + point[5] * (*w_gpu)) + 2]) / 3;
 				new_color_b = alpha*src[3 * index] + (1 - alpha)*mean_b;
 				new_color_g = alpha*src[3 * index + 1] + (1 - alpha)*mean_g;
 				new_color_r = alpha*src[3 * index + 2] + (1 - alpha)*mean_r;
@@ -144,38 +165,59 @@ __global__ void deblur(float *src, float *src_deriv, float *dst, float *dst_deri
 				}
 			}
 		}
+		idx += blockDim.x*gridDim.x;
+		if (idx >= (*w_gpu)) {
+			idx = idx % (*w_gpu);
+			idy+= blockDim.y*gridDim.y;
+		}
 	}
 }
-__global__ void calculate_grad(float *src_deriv, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
-	int index = blockIdx.x*blockDim.x + threadIdx.x;
-	if (index < (*nbytes_gpu / sizeof(float))) {
-		int idx = index % (*w_gpu);
-		int idy = index / (*w_gpu);
+__global__ void calculate_grad(bool reverse, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
+	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+	int idy = blockIdx.y* blockDim.y + threadIdx.y;
+	int index = idy*(*w_gpu) + idx;
+	while (idx<(*w_gpu) && idy<(*h_gpu)) {
 		int xl = max2(-idx, -1);
 		int xr = min2((*w_gpu) - 1 - idx, 1);
 		int yu = max2(-idy, -1);
 		int yd = min2((*h_gpu) - 1 - idy, 1);
-		/*dst_deriv[index] = -src_deriv[idx + xl + (idy + yu)*(*w_gpu)] - src_deriv[idx + (idy + yu)*(*w_gpu)] - src_deriv[idx + xr + (idy + yu)*(*w_gpu)] \
-			- src_deriv[idx + xl + idy*(*w_gpu)] + 8 * src_deriv[index] - src_deriv[idx + xr + idy*(*w_gpu)] \
-			- src_deriv[idx + xl + (idy + yd)*(*w_gpu)] - src_deriv[idx + (idy + yd)*(*w_gpu)] - src_deriv[idx + xr + (idy + yd)*(*w_gpu)];*/
-		dst_deriv[index] = abs(-src_deriv[idx + xl + (idy + yu)*(*w_gpu)] - 2 * src_deriv[idx + (idy + yu)*(*w_gpu)] - src_deriv[idx + xr + (idy + yu)*(*w_gpu)] + src_deriv[idx + xl + (idy + yd)*(*w_gpu)] + 2 * src_deriv[idx + (idy + yd)*(*w_gpu)] + src_deriv[idx + xr + (idy + yd)*(*w_gpu)])
-			+ abs(-src_deriv[idx + xl + (idy + yu)*(*w_gpu)] - 2 * src_deriv[idx +xl+ idy*(*w_gpu)] - src_deriv[idx + xl + (idy + yd)*(*w_gpu)] + src_deriv[idx + xr + (idy + yd)*(*w_gpu)] + 2 * src_deriv[idx+xr + idy*(*w_gpu)] + src_deriv[idx + xr + (idy + yu)*(*w_gpu)]);
-		dst_deriv[index] = min2(max2(dst_deriv[index]/2, 0), 255);
+		if (reverse) {
+			dst_deriv[index] = abs(-tex2D(tex_output_deriv, idx + xl, idy + yu) - 2 * tex2D(tex_output_deriv, idx, idy + yu) - tex2D(tex_output_deriv, idx + xr, idy + yu) + tex2D(tex_output_deriv, idx + xl, idy + yd) + 2 * tex2D(tex_output_deriv, idx, idy + yd) + tex2D(tex_output_deriv, idx + xr, idy + yd))
+				+ abs(-tex2D(tex_output_deriv, idx + xl, idy + yu) - 2 * tex2D(tex_output_deriv, idx + xl, idy) - tex2D(tex_output_deriv, idx + xl, idy + yd) + tex2D(tex_output_deriv, idx + xr, idy + yd) + 2 * tex2D(tex_output_deriv, idx + xr, idy) + tex2D(tex_output_deriv, idx + xr, idy + yu));
+
+		}
+		else {
+			dst_deriv[index] = abs(-tex2D(tex_img_deriv, idx + xl, idy + yu) - 2 * tex2D(tex_img_deriv, idx, idy + yu) - tex2D(tex_img_deriv, idx + xr, idy + yu) + tex2D(tex_img_deriv, idx + xl, idy + yd) + 2 * tex2D(tex_img_deriv, idx, idy + yd) + tex2D(tex_img_deriv, idx + xr, idy + yd))
+				+ abs(-tex2D(tex_img_deriv, idx + xl, idy + yu) - 2 * tex2D(tex_img_deriv, idx + xl, idy) - tex2D(tex_img_deriv, idx + xl, idy + yd) + tex2D(tex_img_deriv, idx + xr, idy + yd) + 2 * tex2D(tex_img_deriv, idx + xr, idy) + tex2D(tex_img_deriv, idx + xr, idy + yu));
+
+		}
+		dst_deriv[index] = min2(max2(dst_deriv[index] / 2, 0), 255);
+		idx += blockDim.x*gridDim.x;
+		if (idx >= (*w_gpu)) {
+			idx = idx % (*w_gpu);
+			idy += blockDim.y*gridDim.y;
+		}
 	}
 }
-__global__ void grad_refine(float *src, float *src_deriv, float *dst, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
-	int index = blockIdx.x*blockDim.x + threadIdx.x;
-	if (index < (*nbytes_gpu / sizeof(float))) {
-		float alpha = 0.0f / 255;//0.0f/255
+__global__ void grad_refine(float *src, float *dst, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse) {
+	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+	int idy = blockIdx.y* blockDim.y + threadIdx.y;
+	int index = idy*(*w_gpu) + idx;
+	while (idx<(*w_gpu) && idy<(*h_gpu)) {
+		float alpha = 0.0f / 255;
 		bool result = false;
 		int point[] = { 0,0,0,0,0,0 };
-		dst_deriv[index] = src_deriv[index];
+		if (reverse) {
+			dst_deriv[index] = tex2D(tex_output_deriv, idx, idy);
+		}
+		else {
+			dst_deriv[index] = tex2D(tex_img_deriv, idx, idy);
+		}
 		dst[3 * index] = src[3 * index];
 		dst[3 * index + 1] = src[3 * index + 1];
 		dst[3 * index + 2] = src[3 * index + 2];
-		bool execute = false;
 		for (int i = 0; i < 8; ++i) {
-			condition(src_deriv, i, index, result, point, h_gpu, w_gpu);
+			condition(reverse, i, idx, idy, result, point, h_gpu, w_gpu);
 			if (result == true) {
 				float new_color_b = 0;
 				float new_color_g = 0;
@@ -190,56 +232,58 @@ __global__ void grad_refine(float *src, float *src_deriv, float *dst, float *dst
 				new_color_b = alpha*src[3 * index] + (1 - alpha)*mean_b;
 				new_color_g = alpha*src[3 * index + 1] + (1 - alpha)*mean_g;
 				new_color_r = alpha*src[3 * index + 2] + (1 - alpha)*mean_r;
-				deriv = alpha*src_deriv[index] + (1 - alpha)*(src_deriv[point[0] + point[1] * (*w_gpu)] + src_deriv[point[2] + point[3] * (*w_gpu)] + src_deriv[point[4] + point[5] * (*w_gpu)]) / 3;
+				if (reverse) {
+					deriv = alpha*tex2D(tex_output_deriv, idx, idy) + (1 - alpha)*(tex2D(tex_output_deriv, point[0], point[1]) + tex2D(tex_output_deriv, point[2], point[3]) + tex2D(tex_output_deriv, point[4], point[5])) / 3;
+				}
+				else {
+					deriv = alpha*tex2D(tex_img_deriv, idx, idy) + (1 - alpha)*(tex2D(tex_img_deriv, point[0], point[1]) + tex2D(tex_img_deriv, point[2], point[3]) + tex2D(tex_img_deriv, point[4], point[5])) / 3;
+				}
 				dst_deriv[index] = deriv;
 				dst[3 * index] = new_color_b;
 				dst[3 * index + 1] = new_color_g;
 				dst[3 * index + 2] = new_color_r;
-				execute = true;
 				break;
 			}
 		}
-		if (!execute) {
-			dst_deriv[index] = src_deriv[index];
-			dst[3 * index] = src[3 * index];
-			dst[3 * index + 1] = src[3 * index + 1];
-			dst[3 * index + 2] = src[3 * index + 2];
+		idx += blockDim.x*gridDim.x;
+		if (idx >= (*w_gpu)) {
+			idx = idx % (*w_gpu);
+			idy += blockDim.y*gridDim.y;
 		}
 	}
 }
-/*
-__global__ void anime4k(uchar *src, uchar* deriv, uchar *dst, int nbytes) {
-int idx = 0;
-idx = blockIdx.x*blockDim.x + threadIdx.x;
-if (idx < nbytes) {
 
-}
-}
-*/
-__global__ void img_mean(float *src, float *dst, int *nbytes_gpu) {
-	int index = blockIdx.x*blockDim.x + threadIdx.x;
-	if (index < *nbytes_gpu / sizeof(float)) {
-		dst[index] = (src[3 * index] + 3*src[3 * index + 1] + 2*src[3 * index + 2]) / 6;
+__global__ void img_luminance(float *src, float *dst, int* h_gpu, int* w_gpu) {
+	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+	int idy = blockIdx.y* blockDim.y + threadIdx.y;
+	int index = idy*(*w_gpu) + idx;
+	while (idx<(*w_gpu) && idy<(*h_gpu)) {
+		dst[index] = (src[3 * index] + 3 * src[3 * index + 1] + 2 * src[3 * index + 2]) / 6;
+		idx += blockDim.x*gridDim.x;
+		if (idx >= (*w_gpu)) {
+			idx = idx % (*w_gpu);
+			idy += blockDim.y*gridDim.y;
+		}
 	}
 }
 int main(int argc, char **argv)
 {
-	std::string img_path = "C:/Users/75909/Desktop/1080p.jpeg";
-	std::string save_path = "";
+	std::string img_path = argv[1];
+	std::string save_path = argv[2];
+	std::cout<<img_path<<std::endl;
+	std::cout<<save_path<<std::endl;
 	cv::Mat img = cv::imread(img_path);
-	//cv::Mat img;
 	assert(img.channels() == 3);
 	cv::resize(img, img, cv::Size((int)img.cols * 2, (int)img.rows * 2), 0, 0, cv::INTER_CUBIC);
-	//while(1){
-	std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-
 	int w = img.cols;
 	int h = img.rows;
 	int nbytes = w*h * sizeof(float);
-	dim3 block = 512;
-	dim3 grid = (w*h + block.x - 1) / block.x;
-	//uchar* img_data = new uchar[3 * nbytes / sizeof(float)];
-	float *img_vector = new float[3 * nbytes / sizeof(float)];
+	dim3 thread_num(64, 64);
+	dim3 block_num(16, 16);
+	//dim3 grid = (w*h + block.x - 1) / block.x;
+	//float *img_vector = new float[3 * nbytes / sizeof(float)];
+	float *img_vector;
+	cudaMallocHost((void**)&img_vector, 3 * nbytes, cudaHostAllocDefault);
 	for (int i = 0; i < h; ++i) {
 		for (int j = 0; j < w; ++j) {
 			cv::Vec3b* in_row = img.ptr<cv::Vec3b>(i);
@@ -249,11 +293,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/*
-	for (int i = 0; i < 3 * nbytes / sizeof(float); ++i) {
-	img_vector[i] = img_data[i];
-	}
-	*/
 	//首先打印的是channel*col
 	//然后按row打印
 	//转的一维数组 就是直接按这个顺序衔接起来
@@ -266,43 +305,48 @@ int main(int argc, char **argv)
 	cudaMalloc((int**)&w_gpu, sizeof(int));
 	cudaMalloc((int**)&h_gpu, sizeof(int));
 	cudaMalloc((int**)&nbytes_gpu, sizeof(int));
-	float *resul = new float[3 * nbytes / sizeof(float)];
-	float *result_deriv = new float[nbytes / sizeof(float)];
+	cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+	cudaBindTexture2D(NULL, tex_img_deriv, img_deriv, desc, w, h, nbytes);
+	cudaBindTexture2D(NULL, tex_output_deriv, output_deriv, desc, w, h, nbytes);
+	float *resul;
+	cudaMallocHost((void**)&resul, 3 * nbytes, cudaHostAllocDefault);
+	//float *result_deriv = new float[nbytes / sizeof(float)];
 	cudaEvent_t g_start, g_end;
 	cudaEventCreate(&g_start, 0);
 	cudaEventCreate(&g_end, 0);
-	cudaEventRecord(g_start);
-
-	cudaMemcpy(input, img_vector, 3 * nbytes, cudaMemcpyHostToDevice);
-
-	cudaMemcpy(w_gpu, &w, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(h_gpu, &h, sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(nbytes_gpu, &nbytes, sizeof(int), cudaMemcpyHostToDevice);
-
-	img_mean << <grid, block >> > (input, img_deriv, nbytes_gpu);
-
-	deblur << <grid, block >> > (input, img_deriv, output, output_deriv, nbytes_gpu, h_gpu, w_gpu);
-
-	calculate_grad << <grid, block >> > (output_deriv, img_deriv, nbytes_gpu, h_gpu, w_gpu);
-	/*
-	cudaMemcpy(result_deriv, img_deriv, nbytes, cudaMemcpyDeviceToHost);
-	cv::Mat grad_pic = cv::Mat::zeros(img.size(), CV_8UC1);
-	for (int i = 0; i < h; ++i) {
-	for (int j = 0; j < w; ++j) {
-	uchar* out_row = grad_pic.ptr<uchar>(i);
-	out_row[j] = (int)result_deriv[(i*w + j)];
-	}
-	}
-	cv::imwrite("grad.bmp", grad_pic);
-	*/
-	grad_refine << <grid, block >> > (output, img_deriv, input, output_deriv, nbytes_gpu, h_gpu, w_gpu);
-
-	cudaMemcpy(resul, input, 3 * nbytes, cudaMemcpyDeviceToHost);
-	cudaEventRecord(g_end);
-	cudaEventSynchronize(g_end);
 	float time;
-	cudaEventElapsedTime(&time, g_start, g_end);
-	std::cout << "GPU time: " << time << std::endl;
+	std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+
+		cudaMemcpy(input, img_vector, 3 * nbytes, cudaMemcpyHostToDevice);
+		cudaMemcpy(w_gpu, &w, sizeof(int), cudaMemcpyHostToDevice);
+		cudaMemcpy(h_gpu, &h, sizeof(int), cudaMemcpyHostToDevice);
+		cudaMemcpy(nbytes_gpu, &nbytes, sizeof(int), cudaMemcpyHostToDevice);
+    while (1) {
+		cudaEventRecord(g_start);
+		img_luminance << <block_num, thread_num >> > (input, img_deriv, h_gpu, w_gpu);
+
+		deblur << <block_num, thread_num >> > (input, output, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
+
+		calculate_grad << <block_num, thread_num >> > (true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
+		/*
+		cudaMemcpy(result_deriv, img_deriv, nbytes, cudaMemcpyDeviceToHost);
+		cv::Mat grad_pic = cv::Mat::zeros(img.size(), CV_8UC1);
+		for (int i = 0; i < h; ++i) {
+		for (int j = 0; j < w; ++j) {
+		uchar* out_row = grad_pic.ptr<uchar>(i);
+		out_row[j] = (int)result_deriv[(i*w + j)];
+		}
+		}
+		cv::imwrite("grad.bmp", grad_pic);
+		*/
+		grad_refine << <block_num, thread_num >> > (output, input, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
+		cudaMemcpy(resul, input, 3 * nbytes, cudaMemcpyDeviceToHost);
+		cudaEventRecord(g_end);
+		cudaEventSynchronize(g_end);
+		cudaEventElapsedTime(&time, g_start, g_end);
+		std::cout << "GPU time: " << time << std::endl;
+	}
+		
 	//cudaMemcpy(result_deriv, output_deriv, nbytes, cudaMemcpyDeviceToHost);
 	/*
 	float *test = new float[3 * nbytes / sizeof(float)];
@@ -318,6 +362,7 @@ int main(int argc, char **argv)
 	}
 	cv::imwrite("test.bmp", test_pic);
 	*/
+
 	cv::Mat out_pic = cv::Mat::zeros(img.size(), img.type());
 	for (int i = 0; i < h; ++i) {
 		for (int j = 0; j < w; ++j) {
@@ -328,6 +373,16 @@ int main(int argc, char **argv)
 		}
 	}
 
+	cv::imwrite(save_path, out_pic);
+	std::chrono::duration<double, std::milli> time_span = std::chrono::high_resolution_clock::now() - start;
+	std::cout << "time:" << time_span.count() << std::endl;
+
+	cudaUnbindTexture(tex_img_deriv);
+	cudaUnbindTexture(tex_output_deriv);
+	cudaEventDestroy(g_start);
+	cudaEventDestroy(g_end);
+	cudaFreeHost(img_vector);
+	cudaFreeHost(resul);
 	cudaFree(input);
 	cudaFree(output);
 	cudaFree(img_deriv);
@@ -336,10 +391,6 @@ int main(int argc, char **argv)
 	cudaFree(h_gpu);
 	cudaFree(nbytes_gpu);
 
-	cv::imwrite("result.bmp", out_pic);
-	std::chrono::duration<double, std::milli> time_span = std::chrono::high_resolution_clock::now() - start;
-	std::cout << "time:" << time_span.count() << std::endl;
-	//system("pause");
-	//}
 	return 0;
 }
+
