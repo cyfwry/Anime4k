@@ -312,8 +312,8 @@ __device__ void img_luminance(bool reverse, float *dst, int* h_gpu, int* w_gpu) 
 __global__ void kernel(float *dev_input_b, float *dev_input_g, float *dev_input_r, float *dev_output_b, float *dev_output_g, float *dev_output_r, float *img_deriv, float *output_deriv, int* h_gpu, int *w_gpu, int *nbytes_gpu) {
 	img_luminance(false, img_deriv, h_gpu, w_gpu);
 	deblur(dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
-	calculate_grad(true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
-	grad_refine(dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
+	//calculate_grad(true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
+	//grad_refine(dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
 }
 
 int main(int argc, char **argv)
@@ -381,6 +381,7 @@ int main(int argc, char **argv)
 	float time;
 	std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
+
 	cudaMemcpy(dev_input_b, img_vector_b, nbytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_input_g, img_vector_g, nbytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_input_r, img_vector_r, nbytes, cudaMemcpyHostToDevice);
@@ -389,7 +390,7 @@ int main(int argc, char **argv)
 	cudaMemcpy(nbytes_gpu, &nbytes, sizeof(int), cudaMemcpyHostToDevice);
 	//while (1) {
 	cudaEventRecord(g_start);
-	kernel<<<block_num,thread_num>>>(dev_input_b, dev_input_g, dev_input_r, dev_output_b, dev_output_g, dev_output_r, img_deriv, output_deriv, h_gpu, w_gpu, nbytes_gpu);
+	kernel << <block_num, thread_num >> > (dev_input_b, dev_input_g, dev_input_r, dev_output_b, dev_output_g, dev_output_r, img_deriv, output_deriv, h_gpu, w_gpu, nbytes_gpu);
 	//img_luminance << <block_num, thread_num >> > (false, img_deriv, h_gpu, w_gpu);
 
 	//deblur << <block_num, thread_num >> > (dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
