@@ -138,7 +138,7 @@ __device__ void condition(bool reverse, int choice, int idx, int idy, bool &resu
 		result = false;
 	}
 }
-__device__ void deblur(float *dst_b, float *dst_g, float *dst_r, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse) {
+__global__ void deblur(float *dst_b, float *dst_g, float *dst_r, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse) {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	int idx_init = idx;
 	int idy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -190,7 +190,7 @@ __device__ void deblur(float *dst_b, float *dst_g, float *dst_r, float *dst_deri
 		}
 	}
 }
-__device__ void calculate_grad(bool reverse, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
+__global__ void calculate_grad(bool reverse, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu) {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	int idx_init = idx;
 	int idy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -218,7 +218,7 @@ __device__ void calculate_grad(bool reverse, float *dst_deriv, int *nbytes_gpu, 
 		}
 	}
 }
-__device__ void grad_refine(float *dst_b, float *dst_g, float *dst_r, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse, bool reverse_deriv) {
+__global__ void grad_refine(float *dst_b, float *dst_g, float *dst_r, float *dst_deriv, int *nbytes_gpu, int* h_gpu, int* w_gpu, bool reverse, bool reverse_deriv) {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	int idx_init = idx;
 	int idy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -289,7 +289,7 @@ __device__ void grad_refine(float *dst_b, float *dst_g, float *dst_r, float *dst
 		}
 	}
 }
-__device__ void img_luminance(bool reverse, float *dst, int* h_gpu, int* w_gpu) {
+__global__ void img_luminance(bool reverse, float *dst, int* h_gpu, int* w_gpu) {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	int idx_init = idx;
 	int idy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -309,17 +309,17 @@ __device__ void img_luminance(bool reverse, float *dst, int* h_gpu, int* w_gpu) 
 	}
 }
 
-__global__ void kernel(float *dev_input_b, float *dev_input_g, float *dev_input_r, float *dev_output_b, float *dev_output_g, float *dev_output_r, float *img_deriv, float *output_deriv, int* h_gpu, int *w_gpu, int *nbytes_gpu) {
-	img_luminance(false, img_deriv, h_gpu, w_gpu);
-	deblur(dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
-	calculate_grad(true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
-	grad_refine(dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
-}
+//__global__ void kernel(float *dev_input_b, float *dev_input_g, float *dev_input_r, float *dev_output_b, float *dev_output_g, float *dev_output_r, float *img_deriv, float *output_deriv, int* h_gpu, int *w_gpu, int *nbytes_gpu) {
+//	img_luminance(false, img_deriv, h_gpu, w_gpu);
+//	deblur(dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
+//	calculate_grad(true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
+//	grad_refine(dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
+//}
 
 int main(int argc, char **argv)
 {
-	std::string img_path = "C:/Users/75909/Desktop/1080p.jpeg";
-	std::string save_path = "C:/Users/75909/Desktop/result.bmp";
+	std::string img_path = "C:/Users/75909/Desktop/aaa.png";
+	std::string save_path = "C:/Users/75909/Desktop/result.png";
 	std::cout << img_path << std::endl;
 	std::cout << save_path << std::endl;
 	cv::Mat img = cv::imread(img_path);
@@ -389,12 +389,12 @@ int main(int argc, char **argv)
 	cudaMemcpy(nbytes_gpu, &nbytes, sizeof(int), cudaMemcpyHostToDevice);
 	//while (1) {
 	cudaEventRecord(g_start);
-	kernel<<<block_num,thread_num>>>(dev_input_b, dev_input_g, dev_input_r, dev_output_b, dev_output_g, dev_output_r, img_deriv, output_deriv, h_gpu, w_gpu, nbytes_gpu);
-	//img_luminance << <block_num, thread_num >> > (false, img_deriv, h_gpu, w_gpu);
+	//kernel<<<block_num,thread_num>>>(dev_input_b, dev_input_g, dev_input_r, dev_output_b, dev_output_g, dev_output_r, img_deriv, output_deriv, h_gpu, w_gpu, nbytes_gpu);
+	img_luminance << <block_num, thread_num >> > (false, img_deriv, h_gpu, w_gpu);
 
-	//deblur << <block_num, thread_num >> > (dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
+	deblur << <block_num, thread_num >> > (dev_output_b, dev_output_g, dev_output_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, false);
 
-	//calculate_grad << <block_num, thread_num >> > (true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
+	calculate_grad << <block_num, thread_num >> > (true, img_deriv, nbytes_gpu, h_gpu, w_gpu);
 	/*
 	cudaMemcpy(result_deriv, img_deriv, nbytes, cudaMemcpyDeviceToHost);
 	cv::Mat grad_pic = cv::Mat::zeros(img.size(), CV_8UC1);
@@ -406,7 +406,7 @@ int main(int argc, char **argv)
 	}
 	cv::imwrite("grad.bmp", grad_pic);
 	*/
-	//grad_refine << <block_num, thread_num >> > (dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
+	grad_refine << <block_num, thread_num >> > (dev_input_b, dev_input_g, dev_input_r, output_deriv, nbytes_gpu, h_gpu, w_gpu, true, false);
 	cudaDeviceSynchronize();
 	cudaEventRecord(g_end);
 	cudaEventSynchronize(g_end);
